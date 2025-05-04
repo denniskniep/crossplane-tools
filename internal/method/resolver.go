@@ -50,11 +50,15 @@ func NewResolveReferences(traverser *xptypes.Traverser, receiver, clientPath, re
 			return
 		}
 		hasMultiResolution := false
+		hasMultiResolutionMultiTypes := false
 		hasSingleResolution := false
 		resolverCalls := make(jen.Statement, len(refs))
 		for i, ref := range refs {
 			if ref.IsSlice {
 				hasMultiResolution = true
+				if len(ref.RemoteTypes) > 1 {
+					hasMultiResolutionMultiTypes = true
+				}
 				resolverCalls[i] = encapsulate(0, multiResolutionCall(ref, referencePkgPath, convertPkgPath), ref.GoValueFieldPath...).Line()
 			} else {
 				hasSingleResolution = true
@@ -67,6 +71,9 @@ func NewResolveReferences(traverser *xptypes.Traverser, receiver, clientPath, re
 		}
 		if hasMultiResolution {
 			initStatements = append(initStatements, jen.Line().Var().Id("mrsp").Qual(referencePkgPath, "MultiResolutionResponse"))
+		}
+		if hasMultiResolutionMultiTypes {
+			initStatements = append(initStatements, jen.Line().Var().Id("tmpMrsp").Qual(referencePkgPath, "MultiResolutionResponse"))
 		}
 
 		f.Commentf("ResolveReferences of this %s.", o.Name())
@@ -134,31 +141,49 @@ func singleResolutionCall(ref Reference, referencePkgPath string, ptrPkgPath str
 			setResolvedValue = currentValuePath.Clone().Op("=").Qual(ptrPkgPath, toPointerFunction).Call(jen.Id("rsp").Dot("ResolvedValue"))
 			currentValuePath = jen.Qual(ptrPkgPath, fromPointerFunction).Call(currentValuePath, jen.Op(`""`))
 		}
-		return &jen.Statement{
-			jen.List(jen.Id("rsp"), jen.Err()).Op("=").Id("r").Dot("Resolve").Call(
-				jen.Id("ctx"),
-				jen.Qual(referencePkgPath, "ResolutionRequest").Values(jen.Dict{
-					jen.Id("CurrentValue"): currentValuePath,
-					jen.Id("Reference"):    referenceFieldPath,
-					jen.Id("Selector"):     selectorFieldPath,
-					jen.Id("To"): jen.Qual(referencePkgPath, "To").Values(jen.Dict{
-						jen.Id("Managed"): ref.RemoteType,
-						jen.Id("List"):    ref.RemoteListType,
-					}),
-					jen.Id("Extract"): ref.Extractor,
-				},
+
+		var statements = &jen.Statement{}
+
+		for i := 0; i < len(ref.RemoteTypes); i++ {
+			resolveStatement := []jen.Code{
+				jen.List(jen.Id("rsp"), jen.Err()).Op("=").Id("r").Dot("Resolve").Call(
+					jen.Id("ctx"),
+					jen.Qual(referencePkgPath, "ResolutionRequest").Values(jen.Dict{
+						jen.Id("CurrentValue"): currentValuePath,
+						jen.Id("Reference"):    referenceFieldPath,
+						jen.Id("Selector"):     selectorFieldPath,
+						jen.Id("To"): jen.Qual(referencePkgPath, "To").Values(jen.Dict{
+							jen.Id("Managed"): ref.RemoteTypes[i],
+							jen.Id("List"):    ref.RemoteListTypes[i],
+						}),
+						jen.Id("Extract"): ref.Extractor,
+					},
+					),
 				),
-			),
-			jen.Line(),
-			jen.If(jen.Err().Op("!=").Nil()).Block(
-				jen.Return(jen.Qual("github.com/pkg/errors", "Wrap").Call(jen.Err(), jen.Lit(strings.Join(ref.GoValueFieldPath, ".")))),
-			),
+				jen.Line(),
+				jen.If(jen.Err().Op("!=").Nil()).Block(
+					jen.Return(jen.Qual("github.com/pkg/errors", "Wrap").Call(jen.Err(), jen.Lit(strings.Join(ref.GoValueFieldPath, ".")))),
+				),
+			}
+
+			if i == 0 {
+				statements.Add(resolveStatement...)
+			} else {
+				statements.Add(
+					jen.Line(),
+					jen.If(jen.Id("rsp").Dot("ResolvedReference").Op("==").Nil()).Block(
+						resolveStatement...,
+					),
+				)
+			}
+		}
+
+		return statements.Add(
 			jen.Line(),
 			setResolvedValue,
 			jen.Line(),
 			referenceFieldPath.Clone().Op("=").Id("rsp").Dot("ResolvedReference"),
-			jen.Line(),
-		}
+			jen.Line())
 	}
 }
 
@@ -184,31 +209,53 @@ func multiResolutionCall(ref Reference, referencePkgPath string, convertPkgPath 
 			setResolvedValues = currentValuePath.Clone().Op("=").Qual(convertPkgPath, toPointersFunction).Call(jen.Id("mrsp").Dot("ResolvedValues"))
 			currentValuePath = jen.Qual(convertPkgPath, fromPointersFunction).Call(currentValuePath)
 		}
+		var statements = &jen.Statement{}
 
-		return &jen.Statement{
-			jen.List(jen.Id("mrsp"), jen.Err()).Op("=").Id("r").Dot("ResolveMultiple").Call(
-				jen.Id("ctx"),
-				jen.Qual(referencePkgPath, "MultiResolutionRequest").Values(jen.Dict{
-					jen.Id("CurrentValues"): currentValuePath,
-					jen.Id("References"):    referenceFieldPath,
-					jen.Id("Selector"):      selectorFieldPath,
-					jen.Id("To"): jen.Qual(referencePkgPath, "To").Values(jen.Dict{
-						jen.Id("Managed"): ref.RemoteType,
-						jen.Id("List"):    ref.RemoteListType,
-					}),
-					jen.Id("Extract"): ref.Extractor,
-				},
+		for i := 0; i < len(ref.RemoteTypes); i++ {
+
+			resolveStatement := []jen.Code{
+				jen.Id("r").Dot("ResolveMultiple").Call(
+					jen.Id("ctx"),
+					jen.Qual(referencePkgPath, "MultiResolutionRequest").Values(jen.Dict{
+						jen.Id("CurrentValues"): currentValuePath,
+						jen.Id("References"):    referenceFieldPath,
+						jen.Id("Selector"):      selectorFieldPath,
+						jen.Id("To"): jen.Qual(referencePkgPath, "To").Values(jen.Dict{
+							jen.Id("Managed"): ref.RemoteTypes[i],
+							jen.Id("List"):    ref.RemoteListTypes[i],
+						}),
+						jen.Id("Extract"): ref.Extractor,
+					},
+					),
 				),
-			),
-			jen.Line(),
-			jen.If(jen.Err().Op("!=").Nil()).Block(
-				jen.Return(jen.Qual("github.com/pkg/errors", "Wrap").Call(jen.Err(), jen.Lit(strings.Join(ref.GoValueFieldPath, ".")))),
-			),
+			}
+
+			catchErrorStatement := []jen.Code{
+				jen.Line(),
+				jen.If(jen.Err().Op("!=").Nil()).Block(
+					jen.Return(jen.Qual("github.com/pkg/errors", "Wrap").Call(jen.Err(), jen.Lit(strings.Join(ref.GoValueFieldPath, ".")))),
+				),
+			}
+
+			if i == 0 {
+				statements.Add(jen.List(jen.Id("mrsp"), jen.Err()).Op("=")).Add(resolveStatement...).Add(catchErrorStatement...)
+			} else {
+				statements.Add(jen.Line())
+				statements.Add(jen.List(jen.Id("tmpMrsp"), jen.Err()).Op("=")).Add(resolveStatement...).Add(catchErrorStatement...)
+
+				statements.Add(
+					jen.Line(),
+					jen.Id("mrsp").Dot("ResolvedReferences").Op("=").Append(jen.Id("mrsp").Dot("ResolvedReferences"), jen.Id("tmpMrsp").Dot("ResolvedReferences...")),
+					jen.Line(),
+					jen.Id("mrsp").Dot("ResolvedValues").Op("=").Append(jen.Id("mrsp").Dot("ResolvedValues"), jen.Id("tmpMrsp").Dot("ResolvedValues...")),
+				)
+			}
+		}
+		return statements.Add(
 			jen.Line(),
 			setResolvedValues,
 			jen.Line(),
 			referenceFieldPath.Clone().Op("=").Id("mrsp").Dot("ResolvedReferences"),
-			jen.Line(),
-		}
+			jen.Line())
 	}
 }

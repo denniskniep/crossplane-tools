@@ -41,14 +41,14 @@ var regexFunctionCall = regexp.MustCompile(`((.+)\.)?([^.]+\(.*\))`)
 // us generate the resolver.
 type Reference struct {
 	// RemoteType represents the type whose reference we're holding.
-	RemoteType *jen.Statement
+	RemoteTypes []*jen.Statement
 
 	// Extractor is the function call of the function that will take referenced
 	// instance and return a string or []string to be set as value.
 	Extractor *jen.Statement
 
 	// RemoteListType is the list type of the type whose reference we're holding.
-	RemoteListType *jen.Statement
+	RemoteListTypes []*jen.Statement
 
 	// GoValueFieldPath is the list of fields that needs to be traveled to access
 	// the current value field. It may include prefixes like [] for array fields,
@@ -113,7 +113,6 @@ func (rp *ReferenceProcessor) Process(_ *types.Named, f *types.Var, _, comment s
 	if len(refTypeValues) == 0 {
 		return nil
 	}
-	refType := refTypeValues[0]
 	isPointer := false
 	isList := false
 	isFloatPointer := false
@@ -157,8 +156,8 @@ func (rp *ReferenceProcessor) Process(_ *types.Named, f *types.Var, _, comment s
 	}
 	path := append([]string{rp.Receiver}, parentFields...)
 	rp.refs = append(rp.refs, Reference{
-		RemoteType:          getTypeCodeFromPath(refType),
-		RemoteListType:      getTypeCodeFromPath(refType, "List"),
+		RemoteTypes:         getTypeCodeFromPath(refTypeValues),
+		RemoteListTypes:     getTypeCodeFromPath(refTypeValues, "List"),
 		Extractor:           extractorPath,
 		GoValueFieldPath:    append(path, f.Name()),
 		GoRefFieldName:      refFieldName,
@@ -175,14 +174,19 @@ func (rp *ReferenceProcessor) GetReferences() []Reference {
 	return rp.refs
 }
 
-func getTypeCodeFromPath(path string, nameSuffix ...string) *jen.Statement {
-	words := strings.Split(path, ".")
-	if len(words) == 1 {
-		return jen.Op("&").Id(path + strings.Join(nameSuffix, "")).Values()
+func getTypeCodeFromPath(paths []string, nameSuffix ...string) []*jen.Statement {
+	var statements []*jen.Statement
+	for _, path := range paths {
+		words := strings.Split(path, ".")
+		if len(words) == 1 {
+			statements = append(statements, jen.Op("&").Id(path+strings.Join(nameSuffix, "")).Values())
+			continue
+		}
+		name := words[len(words)-1] + strings.Join(nameSuffix, "")
+		pkg := strings.TrimSuffix(path, "."+words[len(words)-1])
+		statements = append(statements, jen.Op("&").Qual(pkg, name).Values())
 	}
-	name := words[len(words)-1] + strings.Join(nameSuffix, "")
-	pkg := strings.TrimSuffix(path, "."+words[len(words)-1])
-	return jen.Op("&").Qual(pkg, name).Values()
+	return statements
 }
 
 func getFuncCodeFromPath(path string) (*jen.Statement, error) {
